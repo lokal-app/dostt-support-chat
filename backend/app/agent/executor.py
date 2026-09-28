@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 def execute(tool_name: str, tool_input: dict, ctx: SessionContext) -> ToolResult:
     spec = REGISTRY.get(tool_name)
     if spec is None:
+        logger.warning("Executor: unknown tool '%s' — rejecting", tool_name)
         return ToolResult(
             content_for_model=f"error: unknown tool '{tool_name}'",
             summary_for_trace=f"Tried to call unknown tool '{tool_name}'",
@@ -35,10 +36,13 @@ def execute(tool_name: str, tool_input: dict, ctx: SessionContext) -> ToolResult
     safe_input.pop("account_id", None)
     safe_input["account_id"] = ctx.account_id
 
+    logger.info("Executor: dispatching %s → handler (account_id=%d, session=%s)", tool_name, ctx.account_id, ctx.session_id)
     try:
-        return spec.handler(safe_input, ctx)
+        result = spec.handler(safe_input, ctx)
+        logger.info("Executor: %s completed (ok=%s)", tool_name, not result.is_error)
+        return result
     except Exception:
-        logger.exception("Tool execution failed for %s", tool_name)
+        logger.exception("Executor: tool execution FAILED for %s", tool_name)
         return ToolResult(
             content_for_model="error: tool execution failed",
             summary_for_trace=f"'{tool_name}' failed",

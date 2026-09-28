@@ -163,6 +163,7 @@ async function resetChat() {
   state.history = [];
   hideAttachmentChip(); // a new session has no pending attachment
 
+  console.log("[resetChat] userId=" + state.userId + " lang=" + state.lang);
   botBubble(t(state.lang, "connecting"));
   try {
     const session = await api.initSession(state.userId, state.lang);
@@ -170,7 +171,9 @@ async function resetChat() {
     state.accountId = session.account_id;
     state.name = session.name;
     state.role = session.role;
+    console.log("[resetChat] session ready:", JSON.stringify(session));
   } catch (err) {
+    console.error("[resetChat] session init failed:", err.message || err);
     $body.innerHTML = "";
     botBubble(escapeHtml(t(state.lang, "couldntStartSession", err.message || "unknown error")));
     return;
@@ -194,6 +197,7 @@ function showCategoryCards() {
 }
 
 function selectCategory(cat) {
+  console.log("[selectCategory]", cat);
   if (cat === "calls") { userBubble(t(state.lang, "catCalls")); showCallsFlow(); }
   else if (cat === "tx") { userBubble(t(state.lang, "catTx")); showTransactionsFlow(); }
   else { userBubble(t(state.lang, "catOther")); botBubble(t(state.lang, "catOtherPrompt")); }
@@ -209,8 +213,11 @@ async function showCallsFlow() {
   const typingEl = showTyping();
   let calls;
   try {
+    console.log("[showCallsFlow] fetching calls for account_id=" + state.accountId);
     calls = await api.recentCalls(state.accountId);
+    console.log("[showCallsFlow] got " + calls.length + " calls");
   } catch (err) {
+    console.error("[showCallsFlow] failed:", err.message);
     typingEl.remove();
     botBubble(escapeHtml(t(state.lang, "connectionError")));
     return;
@@ -250,8 +257,11 @@ async function showTxList(kind, landingCategory) {
   const typingEl = showTyping();
   let txs;
   try {
+    console.log("[showTxList] fetching " + kind + " for account_id=" + state.accountId);
     txs = await api.recentTransactions(state.accountId, kind);
+    console.log("[showTxList] got " + txs.length + " " + kind + " records");
   } catch (err) {
+    console.error("[showTxList] failed:", err.message);
     typingEl.remove();
     botBubble(escapeHtml(t(state.lang, "connectionError")));
     return;
@@ -291,6 +301,7 @@ function showFaqCards(faqs, buildMessage) {
 /* ------------------------------- Messaging -------------------------------- */
 async function sendMessage(text, { skipEcho } = {}) {
   if (!text.trim() || state.ended) return;
+  console.log("[sendMessage] text=" + text.slice(0, 80) + " history_len=" + state.history.length);
   if (!skipEcho) userBubble(text);
   state.history.push({ role: "account", text });
 
@@ -298,11 +309,13 @@ async function sendMessage(text, { skipEcho } = {}) {
   try {
     const resp = await api.sendChat(state.sessionId, text, state.history.slice(0, -1), state.authToken, state.appVersion);
     typingEl.remove();
+    console.log("[sendMessage] reply received, trace=" + JSON.stringify(resp.trace) + " metadata=" + JSON.stringify(resp.metadata));
     traceLines(resp.trace);
     botBubble(escapeHtml(resp.reply));
     state.history.push({ role: "assistant", text: resp.reply });
 
     if (resp.metadata && resp.metadata.created_ticket_id) {
+      console.log("[sendMessage] ticket created: #" + resp.metadata.created_ticket_id);
       renderTicketRaised(resp.metadata.created_ticket_id);
       hideAttachmentChip(); // the backend already consumed it into that ticket
     }
@@ -330,6 +343,7 @@ async function sendMessage(text, { skipEcho } = {}) {
     }
   } catch (err) {
     typingEl.remove();
+    console.error("[sendMessage] failed:", err.status, err.message);
     if (err.status === 500) {
       botBubble(escapeHtml(t(state.lang, "needsGeminiKey")));
     } else {
@@ -371,6 +385,7 @@ async function loadTicketsTab() {
   });
 }
 function switchTab(tab) {
+  console.log("[switchTab]", tab);
   const onChat = tab === "chat";
   $body.hidden = !onChat;
   $composerBar.hidden = !onChat;

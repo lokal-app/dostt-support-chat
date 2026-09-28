@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -8,12 +10,16 @@ from app.models.account import Account
 from app.schemas.ticket import TicketIntakeRequest, TicketRead
 from app.services import ticket_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/tickets", tags=["tickets"])
 
 
 @router.get("", response_model=list[TicketRead])
 def list_my_tickets(account_id: int = Query(...), db: Session = Depends(get_db)) -> list[TicketRead]:
+    logger.info("Tickets: listing tickets for account_id=%d", account_id)
     tickets = ticket_service.list_tickets_for_account(db, account_id)
+    logger.info("Tickets: found %d tickets", len(tickets))
     return [TicketRead.model_validate(t) for t in tickets]
 
 

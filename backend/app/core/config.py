@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # (the user's own JWT, handed off by the app alongside user_id — see
     # 2026-09-08 conversation), never a shared secret, so it's a parameter to
     # dostt_api_client.create_ticket(), not a setting here.
-    DOSTT_API_BASE_URL: str = "https://testdostt.getlokalapp.com"
+    DOSTT_API_BASE_URL: str = "https://api.dostt.in"
     DOSTT_APP_VERSION: str = "1.1.36"
     DOSTT_APP_VERSION_CODE: str = "136"
 

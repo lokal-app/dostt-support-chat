@@ -94,6 +94,8 @@ def create_ticket(
     account = db.get(Account, account_id)
     sla_due_at = utcnow() + timedelta(hours=refund_service.sla_hours_for(account)) if account else None
 
+    logger.info("TicketService: creating ticket — account_id=%d, category=%s, sub=%s", account_id, category, sub_category)
+
     ticket = Ticket(
         account_id=account_id,
         category=category,
@@ -108,6 +110,7 @@ def create_ticket(
     )
     db.add(ticket)
     db.flush()  # assigns ticket.id
+    logger.info("TicketService: ticket #%d flushed (status → SUBMITTED)", ticket.id)
     _record_status(db, ticket, TicketStatus.SUBMITTED, note=None, changed_by="system")
 
     team = ESCALATION_TEAM_BY_CATEGORY.get(category)
@@ -116,6 +119,7 @@ def create_ticket(
     admin = admin_mapping_client.assign_admin(db, ticket_count_so_far=len(tickets_so_far))
     if admin is not None:
         ticket.assigned_admin_id = admin.id
+        logger.info("TicketService: ticket #%d auto-assigned to admin %s (team=%s)", ticket.id, admin.name, team)
         _record_status(
             db,
             ticket,
@@ -123,6 +127,8 @@ def create_ticket(
             note=f"Auto-assigned to {admin.name}" + (f" ({team})" if team else ""),
             changed_by="system",
         )
+    else:
+        logger.info("TicketService: ticket #%d — no admin available for assignment", ticket.id)
 
     slack_message = (
         f":ticket: New ticket #{ticket.id} — *{category}* / {sub_category}\n"
@@ -134,6 +140,7 @@ def create_ticket(
 
     db.commit()
     db.refresh(ticket)
+    logger.info("TicketService: ticket #%d committed — final status=%s, sla_due=%s", ticket.id, ticket.status.value, ticket.sla_due_at)
     return ticket
 
 
@@ -180,17 +187,27 @@ def create_ticket_with_automation(
     ticket-intake route (api/routes/tickets.py), which has no chat session
     to attach anything from.
     """
+    logger.info("TicketAutomation: account_id=%d, category=%s, sub=%s, call_id=%s, session_id=%s",
+                account_id, category, sub_category, call_id, session_id)
+
     refund_checked = False
     refund_rule_label = None
     decision = None
 
     if category in refund_service.REFUND_DRIVEN_ISSUE_TAGS and call_id is not None:
+        logger.info("TicketAutomation: refund-driven category — running v1.1 rules for call_id=%s", call_id)
         account = db.get(Account, account_id)
         call = call_client.get_call(db, account_id, call_id)
         if account is not None and call is not None:
             decision = refund_service.decide(account, call, category)
             refund_checked = True
             refund_rule_label = decision.rule_label
+            logger.info("TicketAutomation: refund decision → eligible=%s, rule=%s, reason=%s",
+                        decision.eligible, decision.rule_label, decision.reason)
+        else:
+            logger.info("TicketAutomation: skipped refund check — account=%s, call=%s", account is not None, call is not None)
+    else:
+        logger.info("TicketAutomation: not refund-driven (category=%s, call_id=%s) — skipping refund rules", category, call_id)
 
     account_for_language = db.get(Account, account_id)
     ticket = create_ticket(
@@ -208,12 +225,14 @@ def create_ticket_with_automation(
 
     if decision is not None and decision.eligible:
         note = f"Auto-refunded {decision.refund_coins} coins ({decision.rule_label}) — {decision.reason}"
+        logger.info("TicketAutomation: auto-resolving ticket #%d — %s", ticket.id, note)
         update_status(db, ticket, TicketStatus.RESOLVED, note=note, changed_by="refund automation")
 
     attachment = None
     if session_id is not None:
         attachment = attachment_service.consume_pending_attachment(db, session_id)
         if attachment is not None:
+            logger.info("TicketAutomation: attaching screenshot to ticket #%d — %s", ticket.id, attachment.file_path)
             ticket.attachment_path = attachment.file_path
             db.commit()
 

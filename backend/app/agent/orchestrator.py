@@ -105,7 +105,8 @@ def run_chat_turn(
     trace = AgentTrace()
     metadata: dict = {}
 
-    for _ in range(MAX_ITERATIONS):
+    for iteration in range(MAX_ITERATIONS):
+        logger.info("Agent: iteration %d/%d — calling Gemini", iteration + 1, MAX_ITERATIONS)
         response = _generate_with_retry(client, system=system, contents=contents, tools=tools)
 
         if not _is_usable(response):
@@ -124,12 +125,18 @@ def run_chat_turn(
         function_call_parts = [p for p in parts if p.function_call is not None]
         if not function_call_parts:
             final_text = "".join(p.text for p in parts if p.text is not None)
+            logger.info("Agent: model returned final text (len=%d) after %d iteration(s)", len(final_text), iteration + 1)
             return ChatTurnResult(reply=final_text, trace=trace.to_list(), metadata=metadata)
 
         response_parts = []
         for part in function_call_parts:
             call = part.function_call
-            result = executor.execute(call.name, dict(call.args or {}), ctx)
+            args = dict(call.args or {})
+            logger.info("Agent: tool call → %s(%s)", call.name, ", ".join(f"{k}={v!r}" for k, v in args.items()))
+            result = executor.execute(call.name, args, ctx)
+            logger.info("Agent: tool result ← %s ok=%s summary=%r", call.name, not result.is_error, result.summary_for_trace)
+            if result.metadata:
+                logger.info("Agent: tool metadata: %s", result.metadata)
             trace.add(tool=call.name, ok=not result.is_error, summary=result.summary_for_trace)
             metadata.update(result.metadata)
             response_parts.append(
@@ -137,10 +144,6 @@ def run_chat_turn(
                     name=call.name, response={"result": result.content_for_model}
                 )
             )
-        # The live API rejects role="tool" despite some docs suggesting
-        # otherwise — function responses go back as a "user" turn, same
-        # convention the AstroHelp sibling project's orchestrator verified
-        # against the real API.
         contents.append(types.Content(role="user", parts=response_parts))
 
     trace.truncated = True

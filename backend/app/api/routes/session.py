@@ -114,25 +114,28 @@ def init_session(
 ) -> SessionInitResponse:
     check_rate_limit("session_init_ip", client_ip(request), limit=settings.RATE_LIMIT_SESSION_INIT_PER_IP_PER_MIN)
     resolved_user_id = _decode_banner_user_id(user_id)
+    logger.info("Session init: raw_user_id=%s → resolved=%s, language=%s", user_id, resolved_user_id, language)
+
     account = db.execute(select(Account).where(Account.user_id == resolved_user_id)).scalar_one_or_none()
     if account is None:
         if not resolved_user_id.isdigit():
+            logger.warning("Session init: no account for non-numeric user_id '%s' → 404", resolved_user_id)
             raise NotFoundError(f"No account found for user_id '{resolved_user_id}'")
         try:
+            logger.info("Session init: first-time user %s — creating account", resolved_user_id)
             account = _create_account_for_real_user(db, resolved_user_id, language, user_type_code)
+            logger.info("Session init: created account_id=%d for user %s", account.id, resolved_user_id)
         except IntegrityError:
-            # Two requests for the same brand-new user_id arrived close
-            # together (e.g. the page loading twice, or a reload while the
-            # first request was still in flight) — both saw "no account yet"
-            # and both tried to create one. Whichever loses this race just
-            # falls back to the row the winner already committed, instead of
-            # 500ing.
             db.rollback()
             account = db.execute(select(Account).where(Account.user_id == resolved_user_id)).scalar_one_or_none()
             if account is None:
                 raise
+            logger.info("Session init: race-condition fallback — found existing account_id=%d", account.id)
+    else:
+        logger.info("Session init: found existing account_id=%d, name=%s, role=%s", account.id, account.name, account.role.value)
 
     session = chat_session_service.start_session(db, account.id, language)
+    logger.info("Session init: started session=%s for account_id=%d", session.id, account.id)
     return SessionInitResponse(
         session_id=session.id,
         account_id=account.id,

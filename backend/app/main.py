@@ -1,10 +1,13 @@
+import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
 
 from app.api.routes import attachments, calls, chat, faqs, session, tickets, transactions
 from app.api.routes.admin import login as admin_login
@@ -14,15 +17,11 @@ from app.core.errors import AppError
 
 logger = logging.getLogger(__name__)
 
-# Without this, Python's root logger defaults to WARNING with no configured
-# handler — every logger.info(...) call anywhere in the app (including the
-# ticket real-API-mirror diagnostics in ticket_service.py, added 2026-09-16
-# specifically to make silent no-ops debuggable) is silently dropped rather
-# than reaching stdout, regardless of whether the surrounding
-# infra/log-viewer is otherwise working correctly. This was a real
-# contributing factor, not just an infra/log-viewer issue, the last few
-# times pod logs appeared to show nothing at all.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG if settings.ENVIRONMENT == "dev" else logging.INFO,
+    format="\033[2m%(asctime)s\033[0m %(levelname)s \033[36m%(name)s\033[0m: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 assert_admin_secrets_are_safe(settings)
 
@@ -49,24 +48,80 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def log_webview_entry(request: Request, call_next):
-    # uvicorn's own access log already includes the full raw request line
-    # (path + query string) for every request, so this isn't new visibility
-    # — but that one line is buried among dozens of asset requests (CSS/JS/
-    # fonts) per page load, easy to miss when scanning logs by eye. This
-    # logs ONLY the real webview entry (GET / with a query string — i.e.
-    # the host app opening the page with ?userId=&token=&version=) under a
-    # distinct, greppable tag, to directly answer "what did the app
-    # actually send" without reconstructing anything ourselves.
-    #
-    # Note: this logs the real auth token in plaintext to pod logs (uvicorn's
-    # default access log already does this too — not new exposure, just made
-    # easier to find). Fine for the active debugging this exists for; worth
-    # revisiting (e.g. redacting the token value) before this is relied on
-    # as permanent, always-on logging.
-    if request.url.path == "/" and request.method == "GET" and request.url.query:
-        logger.info("WEBVIEW_ENTRY: %s", request.url.query)
-    return await call_next(request)
+async def dev_request_logger(request: Request, call_next):
+    path = request.url.path
+
+    # Skip static asset noise (CSS/JS/images/fonts)
+    if path.startswith(("/shared/", "/css/", "/js/", "/admin/admin.")) or path.endswith((".ico", ".png", ".map")):
+        return await call_next(request)
+
+    method = request.method
+    qs = str(request.url.query) if request.url.query else ""
+
+    # Read request body for POST/PUT/PATCH (cache it so downstream can still read it)
+    req_body_str = ""
+    if method in ("POST", "PUT", "PATCH"):
+        body_bytes = await request.body()
+        if body_bytes:
+            content_type = request.headers.get("content-type", "")
+            if "json" in content_type:
+                try:
+                    parsed = json.loads(body_bytes)
+                    # Truncate large fields (e.g. history array in /api/chat)
+                    req_body_str = json.dumps(parsed, default=str)
+                    if len(req_body_str) > 1500:
+                        req_body_str = req_body_str[:1500] + "...(truncated)"
+                except Exception:
+                    req_body_str = body_bytes[:500].decode(errors="replace")
+            elif "multipart" in content_type:
+                req_body_str = f"[multipart form data, {len(body_bytes)} bytes]"
+            else:
+                req_body_str = body_bytes[:500].decode(errors="replace")
+
+    # Webview entry (special tag for easy grepping)
+    if path == "/" and method == "GET" and qs:
+        logger.info("\033[1;35mWEBVIEW_ENTRY\033[0m %s", qs)
+
+    header = f"\033[1;33m{'─' * 60}\033[0m"
+    logger.info(header)
+    logger.info("\033[1;32m▶ %s %s\033[0m%s", method, path, f"?{qs}" if qs else "")
+    if req_body_str:
+        logger.info("\033[33m  ↳ body:\033[0m %s", req_body_str)
+
+    t0 = time.perf_counter()
+    response: Response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    # Read response body for API routes (not static HTML pages)
+    res_body_str = ""
+    if path.startswith("/api/"):
+        # Collect the streamed response body
+        body_chunks = []
+        async for chunk in response.body_iterator:
+            body_chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+        res_bytes = b"".join(body_chunks)
+        # Rebuild response so it can still be sent to the client
+        response = Response(
+            content=res_bytes,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
+        if res_bytes:
+            try:
+                res_body_str = res_bytes.decode()
+                if len(res_body_str) > 2000:
+                    res_body_str = res_body_str[:2000] + "...(truncated)"
+            except Exception:
+                res_body_str = f"[{len(res_bytes)} bytes]"
+
+    status = response.status_code
+    color = "\033[1;32m" if status < 400 else "\033[1;31m"
+    logger.info("%s◀ %d\033[0m in \033[36m%.0fms\033[0m", color, status, elapsed_ms)
+    if res_body_str:
+        logger.info("\033[33m  ↳ response:\033[0m %s", res_body_str)
+
+    return response
 
 
 @app.exception_handler(AppError)
